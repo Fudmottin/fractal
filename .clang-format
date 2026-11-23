@@ -27,7 +27,6 @@ AllowShortLambdasOnASingleLine: All
 AllowShortIfStatementsOnASingleLine: true
 AllowShortLoopsOnASingleLine: true
 AllowShortCaseLabelsOnASingleLine: false
-PenaltyBreakBeforeFirstCallParameter: 100
 
 # Spaces
 SpaceBeforeParens: ControlStatements

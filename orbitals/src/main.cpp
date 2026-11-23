@@ -51,12 +51,12 @@ struct Configuration {
 std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
    po::options_description options{"Options"};
 
-   options.add_options()("help,h", "Display this help message")(
-      "version,v",
-      "Display version information")("max-iterations,n",
-                                     po::value<int>()->default_value(
-                                        Configuration::default_max_iterations),
-                                     "Maximum iterations per orbit");
+   auto add = options.add_options();
+   add("help,h", "Display this help message");
+   add("version,v", "Display version information");
+   add("max-iterations,n",
+       po::value<int>()->default_value(Configuration::default_max_iterations),
+       "Maximum iterations per orbit");
 
    po::variables_map vm;
    po::store(po::parse_command_line(argc, argv, options), vm);
