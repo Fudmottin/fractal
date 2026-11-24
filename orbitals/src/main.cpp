@@ -5,6 +5,8 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
@@ -23,6 +25,55 @@ struct OrbitalResult {
    std::vector<Complex> points;
    int iterations{0};
    bool escaped{false};
+};
+
+struct CoordinateGrid {
+   std::vector<double> coordinates;
+   double scale;
+};
+
+class HistogramGrid {
+ public:
+   HistogramGrid() = default;
+
+   HistogramGrid(int width, int height) { set_size(width, height); }
+
+   void set_size(int width, int height) {
+      if (width <= 0 || height <= 0) {
+         throw std::invalid_argument("Histogram dimensions must be positive");
+      }
+
+      std::vector<std::uint64_t> new_counts(
+         static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
+
+      counts_ = std::move(new_counts);
+      width_ = width;
+      height_ = height;
+   }
+
+   bool increment(int row, int column) noexcept {
+      if (row < 0 || row >= height_ || column < 0 || column >= width_) {
+         return false;
+      }
+
+      const auto index =
+         static_cast<std::size_t>(row) * static_cast<std::size_t>(width_) +
+         static_cast<std::size_t>(column);
+
+      ++counts_[index];
+      return true;
+   }
+
+   int width() const noexcept { return width_; }
+
+   int height() const noexcept { return height_; }
+
+   const std::vector<std::uint64_t>& data() const noexcept { return counts_; }
+
+ private:
+   std::vector<std::uint64_t> counts_;
+   int width_{0};
+   int height_{0};
 };
 
 inline void compute_orbits(Complex c, int max_iterations,
@@ -46,6 +97,31 @@ inline void compute_orbits(Complex c, int max_iterations,
 
       result.points.push_back(z);
    }
+}
+
+std::vector<double> make_coordinate_lut(int width) {
+   const double step = 4.0 / width;
+
+   std::vector<double> coordinates;
+   coordinates.reserve(static_cast<std::size_t>(width));
+
+   for (int i = 0; i < width; ++i) {
+      coordinates.push_back(-2.0 + (i + 0.5) * step);
+   }
+
+   return coordinates;
+}
+
+std::optional<int> pixel_index(double x, int width) {
+   if (!std::isfinite(x) || x < -2.0 || x > 2.0) {
+      return std::nullopt;
+   }
+
+   if (x == 2.0) {
+      return width - 1;
+   }
+
+   return static_cast<int>((x + 2.0) * width / 4.0);
 }
 
 struct Configuration {
@@ -152,10 +228,10 @@ std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
    if (vm.count("bottom-right") != 0) {
       config.bottom_right = parse_complex(vm["bottom-right"].as<std::string>());
    }
-   if (config.top_left.real() > config.bottom_right.real()) {
+   if (config.top_left.real() >= config.bottom_right.real()) {
       throw std::invalid_argument("top-left must be left of bottom-right");
    }
-   if (config.top_left.imag() < config.bottom_right.imag()) {
+   if (config.top_left.imag() <= config.bottom_right.imag()) {
       throw std::invalid_argument("top-left must be above bottom-right");
    }
 
@@ -178,25 +254,22 @@ int main(int argc, char* argv[]) try {
    std::cout << "Top left point: " << config->top_left << '\n';
    std::cout << "Bottom right point: " << config->bottom_right << '\n';
 
-   // Temporary tests of orbital computation.
-   const std::vector<Complex> c_vals{
-      {0.0, 0.0}, {-1.0, 0.0}, {3.0, 1.5}, {2.0, 0.0}};
-
    OrbitalResult result;
+   const auto coordinates = make_coordinate_lut(config->width);
+   HistogramGrid histogram{config->width, config->width};
 
-   for (const auto& c : c_vals) {
-      compute_orbits(c, config->max_iterations, result);
+   for (double imag : coordinates) {
+      for (double real : coordinates) {
+         const Complex c{real, imag};
+         compute_orbits(c, config->max_iterations, result);
 
-      std::cout << "C = " << c << '\n';
-      std::cout << "Escaped: " << std::boolalpha << result.escaped << '\n';
-      std::cout << "Iterations: " << result.iterations << '\n';
-
-      for (const auto& z : result.points) {
-         std::cout << z << '\n';
+         // Process the resulting orbit.
+         std::cout << (result.escaped ? ' ' : '*');
       }
-
       std::cout << '\n';
    }
+
+   std::cout << '\n';
 
    return EXIT_SUCCESS;
 
