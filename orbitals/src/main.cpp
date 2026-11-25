@@ -7,12 +7,14 @@
 #include <complex>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <exception>
 #include <iostream>
 #include <limits>
 #include <locale>
 #include <optional>
+#include <png.h>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -47,8 +49,12 @@ class HistogramGrid {
          static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
 
       counts_ = std::move(new_counts);
+
       width_ = width;
       height_ = height;
+
+      x_scale_ = static_cast<double>(width) / 4.0;
+      y_scale_ = static_cast<double>(height) / 4.0;
    }
 
    bool increment(int row, int column) noexcept {
@@ -64,6 +70,24 @@ class HistogramGrid {
       return true;
    }
 
+   bool increment(const std::complex<double>& z) noexcept {
+      const double real = z.real();
+      const double imag = z.imag();
+
+      if (!std::isfinite(real) || !std::isfinite(imag) || real < -2.0 ||
+          real > 2.0 || imag < -2.0 || imag > 2.0) {
+         return false;
+      }
+
+      const int column =
+         real == 2.0 ? width_ - 1 : static_cast<int>((real + 2.0) * x_scale_);
+
+      const int row =
+         imag == -2.0 ? height_ - 1 : static_cast<int>((2.0 - imag) * y_scale_);
+
+      return increment(row, column);
+   }
+
    int width() const noexcept { return width_; }
 
    int height() const noexcept { return height_; }
@@ -72,8 +96,12 @@ class HistogramGrid {
 
  private:
    std::vector<std::uint64_t> counts_;
+
    int width_{0};
    int height_{0};
+
+   double x_scale_{0.0};
+   double y_scale_{0.0};
 };
 
 inline void compute_orbits(Complex c, int max_iterations,
@@ -240,6 +268,94 @@ std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
    return config;
 }
 
+std::vector<std::uint8_t> make_grayscale(const HistogramGrid& histogram,
+                                         std::uint64_t max_count) {
+   const auto& counts = histogram.data();
+   std::vector<std::uint8_t> pixels(counts.size(), 0);
+
+   if (max_count == 0) {
+      return pixels;
+   }
+
+   const double scale = 255.0 / std::log1p(static_cast<double>(max_count));
+
+   for (std::size_t i = 0; i < counts.size(); ++i) {
+      if (counts[i] > 0) {
+         const double intensity =
+            std::log1p(static_cast<double>(counts[i])) * scale;
+         pixels[i] = static_cast<std::uint8_t>(
+            std::clamp(std::lround(intensity), 0L, 255L));
+      }
+   }
+
+   return pixels;
+}
+
+void write_grayscale_png(const std::string& filename, int width, int height,
+                         const std::vector<std::uint8_t>& pixels) {
+   if (width <= 0 || height <= 0) {
+      throw std::invalid_argument("PNG dimensions must be positive");
+   }
+
+   const auto expected_size =
+      static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+
+   if (pixels.size() != expected_size) {
+      throw std::invalid_argument(
+         "Pixel buffer size does not match image dimensions");
+   }
+
+   FILE* fp = std::fopen(filename.c_str(), "wb");
+
+   if (fp == nullptr) {
+      throw std::runtime_error("Failed to open output PNG file");
+   }
+
+   png_structp png_ptr =
+      png_create_write_struct(PNG_LIBPNG_VER_STRING, nullptr, nullptr, nullptr);
+
+   if (png_ptr == nullptr) {
+      std::fclose(fp);
+      throw std::runtime_error("Failed to create PNG write structure");
+   }
+
+   png_infop info_ptr = png_create_info_struct(png_ptr);
+
+   if (info_ptr == nullptr) {
+      png_destroy_write_struct(&png_ptr, nullptr);
+      std::fclose(fp);
+      throw std::runtime_error("Failed to create PNG info structure");
+   }
+
+   if (setjmp(png_jmpbuf(png_ptr))) {
+      png_destroy_write_struct(&png_ptr, &info_ptr);
+      std::fclose(fp);
+      throw std::runtime_error("libpng failed while writing PNG");
+   }
+
+   png_init_io(png_ptr, fp);
+
+   png_set_IHDR(png_ptr, info_ptr, static_cast<png_uint_32>(width),
+                static_cast<png_uint_32>(height), 8, PNG_COLOR_TYPE_GRAY,
+                PNG_INTERLACE_NONE, PNG_COMPRESSION_TYPE_DEFAULT,
+                PNG_FILTER_TYPE_DEFAULT);
+
+   png_write_info(png_ptr, info_ptr);
+
+   for (int row = 0; row < height; ++row) {
+      const auto offset =
+         static_cast<std::size_t>(row) * static_cast<std::size_t>(width);
+
+      auto* row_data = const_cast<png_bytep>(pixels.data() + offset);
+      png_write_row(png_ptr, row_data);
+   }
+
+   png_write_end(png_ptr, info_ptr);
+
+   png_destroy_write_struct(&png_ptr, &info_ptr);
+   std::fclose(fp);
+}
+
 int main(int argc, char* argv[]) try {
    const auto config = parse_arguments(argc, argv);
 
@@ -264,11 +380,28 @@ int main(int argc, char* argv[]) try {
          compute_orbits(c, config->max_iterations, result);
 
          // Process the resulting orbit.
-         std::cout << (result.escaped ? ' ' : '*');
+         if (!result.escaped) {
+            for (const auto& z : result.points) {
+               histogram.increment(z);
+            }
+         }
       }
-      std::cout << '\n';
    }
 
+   const auto& counts = histogram.data();
+   const auto max_count = std::max_element(counts.begin(), counts.end());
+
+   if (max_count != counts.end()) {
+      std::cout << "Maximum histogram count: " << *max_count << '\n';
+   }
+
+   auto pixel_data = make_grayscale(histogram, *max_count);
+
+   // Make the PNG file
+   write_grayscale_png("out.png", histogram.width(), histogram.height(),
+                       pixel_data);
+
+   std::cout << "Wrote out.png\n";
    std::cout << '\n';
 
    return EXIT_SUCCESS;
