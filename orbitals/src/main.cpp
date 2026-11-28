@@ -32,8 +32,26 @@ struct OrbitalResult {
 };
 
 struct CoordinateGrid {
-   std::vector<double> coordinates;
-   double scale;
+   std::vector<double> real;
+   std::vector<double> imag;
+
+   CoordinateGrid(Complex top_left, Complex bottom_right, int columns, int rows)
+      : real(make_axis(top_left.real(), bottom_right.real(), columns))
+      , imag(make_axis(top_left.imag(), bottom_right.imag(), rows)) {}
+
+ private:
+   static std::vector<double> make_axis(double start, double end, int samples) {
+      const double step = (end - start) / samples;
+
+      std::vector<double> coordinates;
+      coordinates.reserve(static_cast<std::size_t>(samples));
+
+      for (int i = 0; i < samples; ++i) {
+         coordinates.push_back(start + (i + 0.5) * step);
+      }
+
+      return coordinates;
+   }
 };
 
 inline void compute_orbits(Complex c, int max_iterations,
@@ -59,42 +77,21 @@ inline void compute_orbits(Complex c, int max_iterations,
    }
 }
 
-std::vector<double> make_coordinate_lut(int width) {
-   const double step = 4.0 / width;
-
-   std::vector<double> coordinates;
-   coordinates.reserve(static_cast<std::size_t>(width));
-
-   for (int i = 0; i < width; ++i) {
-      coordinates.push_back(-2.0 + (i + 0.5) * step);
-   }
-
-   return coordinates;
-}
-
-std::optional<int> pixel_index(double x, int width) {
-   if (!std::isfinite(x) || x < -2.0 || x > 2.0) {
-      return std::nullopt;
-   }
-
-   if (x == 2.0) {
-      return width - 1;
-   }
-
-   return static_cast<int>((x + 2.0) * width / 4.0);
-}
-
 struct Configuration {
    static constexpr int default_max_iterations{1000};
    static constexpr int default_width{640};
+   static constexpr int default_samples{640};
+
    static constexpr Complex default_top_left{-2.0, 2.0};
    static constexpr Complex default_bottom_right{2.0, -2.0};
 
    Complex top_left{default_top_left};
    Complex bottom_right{default_bottom_right};
+
    int max_iterations{default_max_iterations};
    int width{default_width};
-   int height{0};
+   int samples{default_samples};
+   int sample_rows{0};
 };
 
 Complex parse_complex(const std::string& value) {
@@ -118,24 +115,21 @@ Complex parse_complex(const std::string& value) {
    return {real, imag};
 }
 
-int compute_height(const Configuration& config) {
+int compute_sample_rows(const Configuration& config) {
    const double rectangle_width =
       config.bottom_right.real() - config.top_left.real();
 
    const double rectangle_height =
       config.top_left.imag() - config.bottom_right.imag();
 
-   const double height = config.width * (rectangle_height / rectangle_width);
+   const double rows = config.samples * (rectangle_height / rectangle_width);
 
-   if (!std::isfinite(height) || height < 1.0 ||
-       height > std::numeric_limits<int>::max() - 1.0) {
-      throw std::invalid_argument("Computed image height is out of range");
+   if (!std::isfinite(rows) ||
+       rows > static_cast<double>(std::numeric_limits<int>::max() - 1)) {
+      throw std::invalid_argument("Computed sampling height is out of range");
    }
 
-   // Round to the nearest even integer.
-   const auto rounded = std::lround(height / 2.0) * 2;
-
-   return static_cast<int>(std::max(2L, rounded));
+   return static_cast<int>(std::max(1L, std::lround(rows)));
 }
 
 std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
@@ -148,7 +142,10 @@ std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
        po::value<int>()->default_value(Configuration::default_max_iterations),
        "Maximum iterations per orbit");
    add("width,w", po::value<int>()->default_value(Configuration::default_width),
-       "Image width in pixels (sample points)");
+       "Square output image width in pixels");
+   add("samples,s",
+       po::value<int>()->default_value(Configuration::default_samples),
+       "Number of sampling columns in the complex plane");
    add("top-left", po::value<std::string>(),
        "Top-left complex coordinate (real,imag)");
    add("bottom-right", po::value<std::string>(),
@@ -171,8 +168,10 @@ std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
    po::notify(vm);
 
    Configuration config;
+
    config.max_iterations = vm["max-iterations"].as<int>();
    config.width = vm["width"].as<int>();
+   config.samples = vm["samples"].as<int>();
 
    // Validate options and fail hard on invalid option
    if (config.max_iterations <= 0) {
@@ -181,6 +180,9 @@ std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
    if (config.width <= 0 || config.width % 2 != 0) {
       throw std::invalid_argument(
          "width must be an even number greater than 0");
+   }
+   if (config.samples < 16) {
+      throw std::invalid_argument("Samples must be at least 16");
    }
    if (vm.count("top-left") != 0) {
       config.top_left = parse_complex(vm["top-left"].as<std::string>());
@@ -195,7 +197,7 @@ std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
       throw std::invalid_argument("top-left must be above bottom-right");
    }
 
-   config.height = compute_height(config);
+   config.sample_rows = compute_sample_rows(config);
 
    return config;
 }
@@ -297,21 +299,26 @@ int main(int argc, char* argv[]) try {
 
    std::cout << "Beginning computation...\n";
    std::cout << "Maximum iterations: " << config->max_iterations << '\n';
-   std::cout << "Image width: " << config->width << '\n';
-   std::cout << "Image height: " << config->height << '\n';
    std::cout << "Top left point: " << config->top_left << '\n';
    std::cout << "Bottom right point: " << config->bottom_right << '\n';
+   std::cout << "Image dimensions: " << config->width << " x " << config->width
+             << '\n';
+   std::cout << "Sampling dimensions: " << config->samples << " x "
+             << config->sample_rows << '\n';
 
    OrbitalResult result;
-   const auto coordinates = make_coordinate_lut(config->width);
+
+   const CoordinateGrid sampling{config->top_left, config->bottom_right,
+                                 config->samples, config->sample_rows};
+
    HistogramGrid histogram{config->width, config->width};
 
-   for (double imag : coordinates) {
-      for (double real : coordinates) {
+   for (double imag : sampling.imag) {
+      for (double real : sampling.real) {
          const Complex c{real, imag};
+
          compute_orbits(c, config->max_iterations, result);
 
-         // Process the resulting orbit.
          if (!result.escaped) {
             for (const auto& z : result.points) {
                histogram.increment(z);
