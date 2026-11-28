@@ -81,13 +81,14 @@ struct Configuration {
    static constexpr int default_max_iterations{1000};
    static constexpr int default_width{640};
    static constexpr int default_samples{640};
-
    static constexpr Complex default_top_left{-2.0, 2.0};
    static constexpr Complex default_bottom_right{2.0, -2.0};
+   static constexpr const char* default_output{"out"};
 
    Complex top_left{default_top_left};
    Complex bottom_right{default_bottom_right};
 
+   std::string output{default_output};
    int max_iterations{default_max_iterations};
    int width{default_width};
    int samples{default_samples};
@@ -150,6 +151,9 @@ std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
        "Top-left complex coordinate (real,imag)");
    add("bottom-right", po::value<std::string>(),
        "Bottom-right complex coordinate (real,imag)");
+   add("output,o",
+       po::value<std::string>()->default_value(Configuration::default_output),
+       "Output filename without extension");
 
    po::variables_map vm;
    po::store(po::parse_command_line(argc, argv, options), vm);
@@ -172,6 +176,7 @@ std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
    config.max_iterations = vm["max-iterations"].as<int>();
    config.width = vm["width"].as<int>();
    config.samples = vm["samples"].as<int>();
+   config.output = vm["output"].as<std::string>();
 
    // Validate options and fail hard on invalid option
    if (config.max_iterations <= 0) {
@@ -195,6 +200,9 @@ std::optional<Configuration> parse_arguments(int argc, char* argv[]) {
    }
    if (config.top_left.imag() <= config.bottom_right.imag()) {
       throw std::invalid_argument("top-left must be above bottom-right");
+   }
+   if (config.output.empty()) {
+      throw std::invalid_argument("output filename must not be empty");
    }
 
    config.sample_rows = compute_sample_rows(config);
@@ -337,11 +345,12 @@ int main(int argc, char* argv[]) try {
    auto pixel_data = make_grayscale(histogram, *max_count);
 
    // Make the PNG file
-   write_grayscale_png("out.png", histogram.width(), histogram.height(),
+   const std::string filename = config->output + ".png";
+
+   write_grayscale_png(filename, histogram.width(), histogram.height(),
                        pixel_data);
 
-   std::cout << "Wrote out.png\n";
-   std::cout << '\n';
+   std::cout << "Wrote " << filename << '\n';
 
    return EXIT_SUCCESS;
 
